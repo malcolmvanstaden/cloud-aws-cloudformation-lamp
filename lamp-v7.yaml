@@ -1,0 +1,297 @@
+#==============================================================================
+#                                 LAMP SERVER
+#
+# AUTHOR:     https://malcolm.cloud | malcolmvs@gmail.com
+#
+#------------------------------------------------------------------------------
+# NOTES:
+# Deploy an AWS Linux 1 insatnce and install Apache, PHP and MySQL
+#
+#------------------------------------------------------------------------------
+# DATE:       VER:  CHANGE:
+#------------------------------------------------------------------------------
+# 2018-06-05  1     Initial version
+# 2020-03-29  7     Updated Amzon Linux 1 AMIs & Sizes
+#
+#==============================================================================
+AWSTemplateFormatVersion: 2010-09-09
+Description: LAMP Server
+
+#------------------------------------------------------------------------------
+# INPUT PARAMETERS
+#------------------------------------------------------------------------------
+Parameters:
+  ServerName:
+    Description: Enter a name for the LAMP server
+    Type: String
+    MinLength: 2
+    ConstraintDescription: Enter a valid server name
+  ServerSize:
+    Description: Select a server size for the LAMP server
+    Type: String
+    Default: 't3.nano'
+    AllowedValues:
+      - 't3.nano'
+      - 't3.micro'
+      - 't3.small'
+      - 't3.medium'
+      - 't3.large'
+  ServerEC2VolumeSize:
+    Type: Number
+    Default: '20'
+    MinValue: '10'
+    MaxValue: '1000'
+    Description: Enter your volume size in GB (Minimum 10)
+    ConstraintDescription: Enter a value between 10 and 1000
+  ServerBackup:
+    Description: Snapshot this server daily?
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+  MySQLRootPassword:
+    Type: String
+    Default: QJjcCQSuJMEY9Wsv
+    Description: >-
+      Specify a password for the MySQL root user, must not contain special characters
+    MinLength: '8'
+    MaxLength: '30'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the LAMP server
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    MinLength: '1'
+    ConstraintDescription: EC2 Keypair is required
+  PublicSubnetId:
+    Description: >-
+      Select the public subnet into which this LAMP server needs to be deployed
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    MinLength: '1'
+    ConstraintDescription: >-
+      Select the public subnet into which this LAMP server needs to be deployed
+  SecurityGroupManagement:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: 'Select the existing management security group'
+    MinLength: '1'
+  SecurityGroupWeb:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: 'Select the existing web security group'
+    MinLength: '1'
+
+
+#------------------------------------------------------------------------------
+# METADATA - TO ORGANISE INPUT GROUPS
+#------------------------------------------------------------------------------
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Server Information"
+        Parameters:
+            - ServerName
+            - ServerSize
+            - ServerEC2VolumeSize
+            - ServerBackup
+            - KeyName
+      -
+        Label:
+          default: "MySQL Information"
+        Parameters:
+            - MySQLRootPassword
+      -
+        Label:
+          default: "Network Information"
+        Parameters:
+            - PublicSubnetId
+            - SecurityGroupManagement
+            - SecurityGroupWeb
+
+
+#------------------------------------------------------------------------------
+# MAPPINGS
+#------------------------------------------------------------------------------
+Mappings:
+  #----------------------------------------------------------------------------
+  # AMIs FOR AWS LINUX - 2020-03
+  #----------------------------------------------------------------------------
+  RegionMapAMI:
+    eu-west-1:
+      AWSLinux: ami-034d940df32c75d15
+    eu-west-2:
+      AWSLinux: ami-00a1896be20551dc8
+
+
+#------------------------------------------------------------------------------
+# RESOURCES
+#------------------------------------------------------------------------------
+Resources:
+  #----------------------------------------------------------------------------
+  # EC2
+  #----------------------------------------------------------------------------
+  LAMPServer:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      KeyName: !Ref KeyName
+      ImageId: !FindInMap
+        - RegionMapAMI
+        - !Ref 'AWS::Region'
+        - AWSLinux
+      InstanceType: !Ref ServerSize
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref ServerEC2VolumeSize
+            VolumeType: gp2
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'false'
+          DeviceIndex: '0'
+          SubnetId: !Select
+            - '0'
+            - !Ref PublicSubnetId
+          GroupSet:
+            - !Ref SecurityGroupManagement
+            - !Ref SecurityGroupWeb
+      UserData:
+          Fn::Base64: !Sub |
+            #!/bin/sh
+            #===============================================================================
+            # LAMP BOOTSTRAP
+            #
+            # DATE:       VER:  CHANGE:                                 AUTHOR:
+            #-------------------------------------------------------------------------------
+            # 2018-06-05  1     Initial version                         malcolmvs@gmail.com
+            # 2018-06-08  2     Added WITH GRANT OPTION to SQL stmnt    malcolmvs@gmail.com
+            # 2018-06-08  3     Disabled Apache dir browsing            malcolmvs@gmail.com
+            #===============================================================================
+            # VARIABLES
+            #===============================================================================
+            AWS_MYSQLROOTPASSWORD=${MySQLRootPassword}
+
+            #===============================================================================
+            # FUNCTIONS
+            #===============================================================================
+            logthis()
+            {
+              LOGDATA=$1
+              NOW=$(date +"%Y-%m-%d %H:%M:%S")
+              echo "$NOW   $LOGDATA" >> ~/bootstrap.log
+            }
+
+            #-------------------------------------------------------------------------------
+            # START
+            #-------------------------------------------------------------------------------
+            logthis "Script started as $(whoami)"
+
+
+            #-------------------------------------------------------------------------------
+            # UPDATE
+            #-------------------------------------------------------------------------------
+            logthis "Runing updates"
+            sudo yum update -y
+
+
+            #-------------------------------------------------------------------------------
+            # INSTALL LAMP STACK
+            #-------------------------------------------------------------------------------
+            logthis "Installing the LAMP stack"
+            sudo yum install -y httpd24 php70 mysql57-server php70-mysqlnd mod24_ssl
+
+
+            #-------------------------------------------------------------------------------
+            # CONFIGURING APACHE
+            #-------------------------------------------------------------------------------
+            #--- Set permissions
+            logthis "Apache - Setting directory permissions"
+            sudo usermod -a -G apache ec2-user
+            sudo chown -R ec2-user:apache /var/www
+            sudo chmod 2775 /var/www
+            find /var/www -type d -exec sudo chmod 2775 {} \;
+            find /var/www -type f -exec sudo chmod 0664 {} \;
+
+            #--- Disable Apache Directory Browsing
+            sudo cp /etc/httpd/conf/httpd.conf /etc/httpd/conf/httpd.conf.bak
+            sed -i 's/Options Indexes FollowSymLinks/Options FollowSymLinks/' /etc/httpd/conf/httpd.conf
+
+            #--- Change the default page to default.php
+            sed -i 's/DirectoryIndex index.html/DirectoryIndex default.php/' /etc/httpd/conf/httpd.conf
+
+            #--- Set default page
+            logthis "Apache - Creating default pages"
+            echo '<?PHP echo "<H1>Hello world!</H1>"; ?>' > /var/www/html/default.php
+
+            #--- Enable httpd service
+            logthis "Apache - Enabling service"
+            sudo chkconfig httpd on
+
+            #--- Start Apache
+            logthis "Apache - Starting service"
+            sudo service httpd start
+
+
+            #-------------------------------------------------------------------------------
+            # CONFIGURING MYSQL
+            #-------------------------------------------------------------------------------
+            logthis "MySQL - Enabling service"
+            sudo chkconfig mysqld on
+
+            #--- Start MySQL
+            logthis "MySQL - Starting service"
+            sudo service mysqld start
+
+            #--- Upgrade MySQL
+            logthis "MySQL - Upgrade schema"
+             mysql_upgrade --force -uroot
+
+            #--- Change Password
+            logthis "MySQL - Change root password"
+            /usr/libexec/mysql57/mysqladmin -u root password $AWS_MYSQLROOTPASSWORD
+
+            #--- Allow Remote Root Logins
+            logthis "MySQL - Allow remote root login"
+            echo "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY '$AWS_MYSQLROOTPASSWORD' WITH GRANT OPTION;" > setup.sql
+            mysql < setup.sql -uroot -p$AWS_MYSQLROOTPASSWORD
+            rm setup.sql -f
+
+
+            #-------------------------------------------------------------------------------
+            # CREATE DIR STRUCTURES
+            #-------------------------------------------------------------------------------
+            mkdir -p /data/backups/www
+            mkdir -p /data/backups/mysql
+            mkdir -p /data/scripts
+            mkdir -p /data/sslcerts/backups
+            mkdir -p /data/temp
+
+
+            #-------------------------------------------------------------------------------
+            # END
+            #-------------------------------------------------------------------------------
+            logthis "Bootstrap complete"
+
+
+      Tags:
+        - Key: Name
+          Value: !Ref ServerName
+        - Key: Backup
+          Value: !Ref ServerBackup
+
+
+  #----------------------------------------------------------------------------
+  # AssignEIP
+  #----------------------------------------------------------------------------
+  LAMPServerEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: LAMPServer
+    Properties:
+      InstanceId: !Ref LAMPServer
+
+
+#------------------------------------------------------------------------------
+# RESOURCES
+#------------------------------------------------------------------------------
+Outputs:
+  ServerIPAddress:
+    Description: LAMP Server IP Address
+    Value: !Ref LAMPServerEIP
